@@ -50,16 +50,20 @@ class GitHubBackup(object):
         self.password = password
         self.organization = organization
 
-    def list_repos(self, include_private=True):
-        if include_private and self.username is None:
-            raise Exception('Can\'t get private repositories without username/password')
+    def _api_request(self, url, basic_auth=True):
+        if basic_auth and self.username is None:
+            raise Exception('Need username/password to do basic authentication')
 
-        request = urllib2.Request(GitHubBackup.GITHUB_API_ORG_REPOS.format(organization=self.organization))
-        if include_private:
+        request = urllib2.Request(url)
+        if basic_auth:
             base64string = base64.encodestring('%s:%s' % (self.username, self.password)).replace('\n', '')
             request.add_header("Authorization", "Basic %s" % base64string)
         response = urllib2.urlopen(request).read()
         return json.loads(response)
+
+    def list_repos(self, include_private=True):
+        request_url = GitHubBackup.GITHUB_API_ORG_REPOS.format(organization=self.organization)
+        return self._api_request(request_url, basic_auth=include_private)
 
     def backup_repos(self, output_dir, progress_cb=None, include_private=True):
         ts = str(int(time()))
