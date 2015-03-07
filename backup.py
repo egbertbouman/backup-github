@@ -11,12 +11,7 @@ import argparse
 import ConfigParser
 
 from time import time
-from subprocess import Popen, PIPE
 from zipfile import ZipFile, ZIP_DEFLATED
-
-GITHUB_API = "https://api.github.com"
-GIT_CLONE_CMD = "git clone --quiet --mirror {url}"
-REMOVE_AFTER = 7 * 24 * 3600 # Remove after 7 days
 
 
 def zip_dir(dir, outputfilename, remove=False):
@@ -40,86 +35,78 @@ def zip_dir(dir, outputfilename, remove=False):
                 raise
         shutil.rmtree(dir, ignore_errors=False, onerror=handleRemoveReadonly)
 
-def resolve_path(executable):
-    if os.path.sep in executable:
-        raise ValueError("Invalid filename: %s" % executable)
-    path = os.environ.get("PATH", "").split(os.pathsep)
-    # PATHEXT tells us which extensions an executable may have
-    path_exts = os.environ.get("PATHEXT", ".exe;.bat;.cmd").split(";")
-    has_ext = os.path.splitext(executable)[1] in path_exts
-    if not has_ext:
-        exts = path_exts
-    else:
-        # Don't try to append any extensions
-        exts = [""]
-    for d in path:
-        try:
-            for ext in exts:
-                exepath = os.path.join(d, executable + ext)
-                if os.access(exepath, os.X_OK):
-                    return exepath
-        except OSError:
-            pass
-    return None
 
-def mirror_repo(url, output_dir, username, password):
-    cmd = GIT_CLONE_CMD.format(url=url) + ' ' + output_dir
-    child = pexpect.spawn(cmd)
-    i = child.expect([pexpect.TIMEOUT, 'Username for', pexpect.EOF], timeout=300)
+class GitHubBackup(object):
 
-    if i == 0:
-        child.terminate()
-        raise Exception('Git timed out')
-    elif i == 1:
-        child.sendline(username)
-        child.expect('Password for')
-        child.sendline(password)
-        child.expect(pexpect.EOF, timeout=300)
-    child.close()
+    GITHUB_API_ORG_REPOS = "https://api.github.com/orgs/{organization}/repos"
+    GITHUB_API_USR_REPOS = "https://api.github.com/users/{user}/repos"
+    GIT_CMD_CLONE = "git clone --quiet --mirror {url} {output_dir}"
+    PRUNE_TIME = 7 * 24 * 3600 # Remove after 7 days
 
-    return child.exitstatus if child.exitstatus != None else child.signalstatus
+    def __init__(self, organization, username=None, password=None):
+        if (username is None) != (password is None):
+            raise ValueError('Missing username or password')
+        self.username = username
+        self.password = password
+        self.organization = organization
 
-def backup(backupdir, organization, username, password):
-    print 'Storing backup for', organization, 'to', backupdir
+    def list_repos(self, include_private=True):
+        if include_private and self.username is None:
+            raise Exception('Can\'t get private repositories without username/password')
 
-    if not os.path.exists(backupdir):
-        print 'Directory', backupdir, 'does not exists, creating it now'
-        os.makedirs(backupdir)
+        request = urllib2.Request(GitHubBackup.GITHUB_API_ORG_REPOS.format(organization=self.organization))
+        if include_private:
+            base64string = base64.encodestring('%s:%s' % (self.username, self.password)).replace('\n', '')
+            request.add_header("Authorization", "Basic %s" % base64string)
+        response = urllib2.urlopen(request).read()
+        return json.loads(response)
 
-    print 'Fetching list of repositories..'
-    request = urllib2.Request(GITHUB_API + '/orgs/' + organization + '/repos')
-    if username != None and password != None:
-        base64string = base64.encodestring('%s:%s' % (username, password)).replace('\n', '')
-        request.add_header("Authorization", "Basic %s" % base64string)
-    repsonse = urllib2.urlopen(request).read()
-    repos = json.loads(repsonse)
-    print 'Found', len(repos), 'repositories'
-
-    repo_urls = {}
-    for repo in repos[:]:
-        repo_urls[repo['name']] = repo['clone_url']
-        repo_urls[repo['name'] + '.wiki'] = repo['clone_url'][:-4] + '.wiki.git'
-
-    for name, url in repo_urls.iteritems():
+    def backup_repos(self, output_dir, progress_cb=None, include_private=True):
         ts = str(int(time()))
-        print 'Backuping up', name + '..',
-        output_dir = '%s/%s-%s-%s.git' % (backupdir, organization, name, ts)
-        if mirror_repo(url, output_dir, username, password) != 0:
-            print 'ERROR'
-        else:
-            zip_dir(output_dir, output_dir + '.zip', remove=True)
-            print 'OK'
 
-def clean_backup_dir(dir):
-    remove_ts = time() - REMOVE_AFTER
-    for dirname, subdirs, files in os.walk(dir):
-        for filename in files:
-            if filename.endswith('.git.zip'):
-                ts = int(filename.split('-')[-1][:-8])
-                if ts < remove_ts:
-                    print 'Removing', filename
-                    path = os.path.join(dirname, filename)
-                    os.remove(path)
+        for repo in self.list_repos(include_private):
+            name = repo['name']
+
+            if progress_cb:
+                progress_cb(name, 0)
+
+            repo_output_dir = '%s/%s-%s-%s.git' % (output_dir, self.organization, name, ts)
+            ret_code = self.backup_repo(repo['clone_url'], repo_output_dir)
+
+            if progress_cb:
+                progress_cb(repo['name'], 1 if ret_code == 0 else -1)
+
+    def backup_repo(self, url, output_dir):
+        cmd = GitHubBackup.GIT_CMD_CLONE.format(url=url, output_dir=output_dir)
+        child = pexpect.spawn(cmd)
+        i = child.expect([pexpect.TIMEOUT, 'Username for', pexpect.EOF], timeout=300)
+
+        if i == 0:
+            child.terminate()
+            raise Exception('A timeout occurred while cloning' + url)
+        elif i == 1:
+            child.sendline(self.username)
+            child.expect('Password for')
+            child.sendline(self.password)
+            child.expect(pexpect.EOF, timeout=300)
+        child.close()
+
+        ret_code = child.exitstatus if child.exitstatus is not None else child.signalstatus
+        if ret_code == 0:
+            zip_dir(output_dir, output_dir + '.zip', remove=True)
+        return ret_code
+
+    def prune_backups(self, dir):
+        remove_ts = time() - GitHubBackup.PRUNE_TIME
+        for dirname, subdirs, files in os.walk(dir):
+            for filename in files:
+                if filename.endswith('.git.zip'):
+                    ts = int(filename.split('-')[-1][:-8])
+                    if ts < remove_ts:
+                        print 'Removing', filename
+                        path = os.path.join(dirname, filename)
+                        os.remove(path)
+
 
 def main(argv):
     parser = argparse.ArgumentParser(add_help=False, description=('Backup a GitHub organization'))
@@ -156,10 +143,23 @@ def main(argv):
 
         if not dir or not organization:
             parser.print_usage()
-            raise ValueError('A directory and GitHub organization are required options')
+            raise ValueError('directory and organization are required options')
 
-        backup(dir, organization, username, password)
-        clean_backup_dir(dir)
+        print 'Storing backup for', organization, 'to', dir
+        if not os.path.exists(dir):
+            print 'Directory', dir, 'does not exists, creating it now'
+            os.makedirs(dir)
+
+        backup = GitHubBackup(organization, username, password)
+
+        def progress_cb(name, state):
+            if state == 0:
+                print 'Backuping up', name + '..',
+            else:
+                print 'OK' if state == 1 else 'ERROR'
+
+        backup.backup_repos(dir, progress_cb)
+        backup.prune_backups(dir)
 
     except Exception, e:
         print 'Error:', str(e)
@@ -168,4 +168,3 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
-
