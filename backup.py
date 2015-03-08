@@ -40,6 +40,7 @@ class GitHubBackup(object):
 
     GITHUB_API_ORG_REPOS = "https://api.github.com/orgs/{organization}/repos"
     GITHUB_API_USR_REPOS = "https://api.github.com/users/{user}/repos"
+    GITHUB_API_COMMITS = "https://api.github.com/repos/{organization_or_user}/{repo_name}/commits"
     GIT_CMD_CLONE = "git clone --quiet --mirror {url} {output_dir}"
     PRUNE_TIME = 7 * 24 * 3600 # Remove after 7 days
 
@@ -59,7 +60,14 @@ class GitHubBackup(object):
             base64string = base64.encodestring('%s:%s' % (self.username, self.password)).replace('\n', '')
             request.add_header("Authorization", "Basic %s" % base64string)
         response = urllib2.urlopen(request).read()
-        return json.loads(response)
+        response_dict = json.loads(response)
+        if 'message' in response_dict:
+            raise Exception(response_dict['message'])
+        return response_dict
+
+    def list_commits(self, repo_name):
+        request_url = GitHubBackup.GITHUB_API_COMMITS.format(organization_or_user=self.organization, repo_name=repo_name)
+        return self._api_request(request_url, basic_auth=self.username is not None)
 
     def list_repos(self, include_private=True):
         request_url = GitHubBackup.GITHUB_API_ORG_REPOS.format(organization=self.organization)
