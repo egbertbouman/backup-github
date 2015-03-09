@@ -135,7 +135,7 @@ class GitHubBackup(object):
 
 
 def main(argv):
-    parser = argparse.ArgumentParser(add_help=False, description=('Backup a GitHub organization'))
+    parser = argparse.ArgumentParser(add_help=False, description=('Backup a GitHub account'))
     parser.add_argument('--help', '-h', action='help', default=argparse.SUPPRESS, help='show this help message and exit')
 
     group1 = parser.add_argument_group(title='File-based configuration')
@@ -161,7 +161,7 @@ def main(argv):
             with open(args.config) as fp:
                 config.readfp(fp)
 
-            section = 'backup-github-organization'
+            section = 'backup-github'
             dir = config.get(section, 'dir')
             organization = config.get(section, 'organization')
             username = config.get(section, 'username')
