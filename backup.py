@@ -1,5 +1,6 @@
 import os
 import sys
+import glob
 import json
 import stat
 import errno
@@ -82,11 +83,20 @@ class GitHubBackup(object):
             if progress_cb:
                 progress_cb(name, 0)
 
-            repo_output_dir = '%s/%s-%s-%s.git' % (output_dir, self.organization, name, ts)
-            ret_code = self.backup_repo(repo['clone_url'], repo_output_dir)
+            skip = False
+            commits = self.list_commits(name)
+            short_sha1 = commits[0]['sha'][:7] if commits else None
+            for filename in glob.glob(os.path.join(output_dir, '*.git.zip')):
+                if short_sha1 == filename.split('-')[-2]:
+                    skip = True
+                    break
+
+            if not skip:
+                repo_output_dir = '%s/%s-%s-%s-%s.git' % (output_dir, self.organization, name, short_sha1, ts)
+                ret_code = self.backup_repo(repo['clone_url'], repo_output_dir)
 
             if progress_cb:
-                progress_cb(repo['name'], 1 if ret_code == 0 else -1)
+                progress_cb(repo['name'], (1 if ret_code == 0 else -1) if not skip else -2)
 
     def backup_repo(self, url, output_dir):
         cmd = GitHubBackup.GIT_CMD_CLONE.format(url=url, output_dir=output_dir)
@@ -109,15 +119,19 @@ class GitHubBackup(object):
         return ret_code
 
     def prune_backups(self, dir):
+        # Get the current backups and sort by timestamp
+        backups = glob.glob(os.path.join(dir, '*.git.zip'))
+        backups = [(int(path.split('-')[-1][:-8]), path) for path in backups]
+        backups.sort()
+
+        # Remove backups that are older than PRUNE_TIME, except when there are no
+        # other backups available for the repository in question.
         remove_ts = time() - GitHubBackup.PRUNE_TIME
-        for dirname, subdirs, files in os.walk(dir):
-            for filename in files:
-                if filename.endswith('.git.zip'):
-                    ts = int(filename.split('-')[-1][:-8])
-                    if ts < remove_ts:
-                        print 'Removing', filename
-                        path = os.path.join(dirname, filename)
-                        os.remove(path)
+        for ts, path in backups:
+            if ts < remove_ts:
+                pattern = '-'.join(path.split('-')[:-2]) + '-???????-??????????.git.zip'
+                if len(glob.glob(pattern)) > 1:
+                    os.remove(path)
 
 
 def main(argv):
@@ -167,8 +181,12 @@ def main(argv):
         def progress_cb(name, state):
             if state == 0:
                 print 'Backuping up', name + '..',
+            elif state == 1:
+                print 'OK'
+            elif state == -2:
+                print 'SKIPPING'
             else:
-                print 'OK' if state == 1 else 'ERROR'
+                print 'ERROR'
 
         backup.backup_repos(dir, progress_cb)
         backup.prune_backups(dir)
