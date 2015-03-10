@@ -46,39 +46,48 @@ class GitHubBackup(object):
     GIT_CMD_CLONE = "git clone --quiet --mirror {url} {output_dir}"
     PRUNE_TIME = 7 * 24 * 3600 # Remove after 7 days
 
-    def __init__(self, organization, username=None, password=None):
-        if (username is None) != (password is None):
-            raise ValueError('Missing username or password')
+    def __init__(self, organization=None, username=None, password=None):
+        if not username and not organization:
+            raise ValueError('Missing username/organization')
+        if organization and username and not password:
+            raise ValueError('Missing password')
         self.username = username
         self.password = password
-        self.organization = organization
+        self.account = organization or username
+        self.is_organization = bool(organization)
 
-    def _api_request(self, url, basic_auth=True):
-        if basic_auth and self.username is None:
-            raise Exception('Need username/password to do basic authentication')
-
+    def _api_request(self, url):
         request = urllib2.Request(url)
-        if basic_auth:
+        if self.password:
             base64string = base64.encodestring('%s:%s' % (self.username, self.password)).replace('\n', '')
             request.add_header("Authorization", "Basic %s" % base64string)
-        response = urllib2.urlopen(request).read()
+
+        try:
+            response = urllib2.urlopen(request).read()
+        except urllib2.HTTPError, error:
+            response = error.read()
+
         response_dict = json.loads(response)
         if 'message' in response_dict:
             raise Exception(response_dict['message'])
+
         return response_dict
 
     def list_commits(self, repo_name):
-        request_url = GitHubBackup.GITHUB_API_COMMITS.format(organization_or_user=self.organization, repo_name=repo_name)
-        return self._api_request(request_url, basic_auth=self.username is not None)
+        request_url = GitHubBackup.GITHUB_API_COMMITS.format(organization_or_user=self.account, repo_name=repo_name)
+        return self._api_request(request_url)
 
-    def list_repos(self, include_private=True):
-        request_url = GitHubBackup.GITHUB_API_ORG_REPOS.format(organization=self.organization)
-        return self._api_request(request_url, basic_auth=include_private)
+    def list_repos(self):
+        if self.is_organization:
+            request_url = GitHubBackup.GITHUB_API_ORG_REPOS.format(organization=self.account)
+        else:
+            request_url = GitHubBackup.GITHUB_API_USR_REPOS.format(user=self.account)
+        return self._api_request(request_url)
 
-    def backup_repos(self, output_dir, progress_cb=None, include_private=True):
+    def backup_repos(self, output_dir, progress_cb=None):
         ts = str(int(time()))
 
-        for repo in self.list_repos(include_private):
+        for repo in self.list_repos():
             name = repo['name']
 
             if progress_cb:
@@ -93,7 +102,7 @@ class GitHubBackup(object):
                     break
 
             if not skip:
-                repo_output_dir = '%s/%s-%s-%s-%s.git' % (output_dir, self.organization, name, short_sha1, ts)
+                repo_output_dir = '%s/%s-%s-%s-%s.git' % (output_dir, self.account, name, short_sha1, ts)
                 ret_code = self.backup_repo(repo['clone_url'], repo_output_dir)
 
             if progress_cb:
@@ -137,7 +146,7 @@ class GitHubBackup(object):
 
 def main(argv):
     parser = argparse.ArgumentParser(add_help=False, description=('Backup a GitHub account'))
-    parser.add_argument('--help', '-h', action='help', default=argparse.SUPPRESS, help='show this help message and exit')
+    parser.add_argument('--help', '-h', action='help', default=argparse.SUPPRESS, help='Show this help message and exit')
 
     group1 = parser.add_argument_group(title='File-based configuration')
     group1.add_argument('--config', '-c', help='Read configuration from file')
@@ -145,7 +154,7 @@ def main(argv):
     group2 = parser.add_argument_group(title='Command line configuration')
     group2.add_argument('--dir', '-d', help='Directory in which to store the backup')
     group2.add_argument('--organization', '-o', help='GitHub organization for which to make a backup')
-    group2.add_argument('--username', '-u', help='GitHub username')
+    group2.add_argument('--username', '-u', help='GitHub username. If no organization is provided, this account will be backed up.')
     group2.add_argument('--password', '-p', help='GitHub password')
 
 
@@ -164,15 +173,15 @@ def main(argv):
 
             section = 'backup-github'
             dir = config.get(section, 'dir')
-            organization = config.get(section, 'organization')
+            organization = config._sections[section].get('organization', None)
             username = config.get(section, 'username')
-            password = config.get(section, 'password')
+            password = config._sections[section].get('password', None)
 
-        if not dir or not organization:
+        if not dir or not (username or organization):
             parser.print_usage()
-            raise ValueError('directory and organization are required options')
+            raise ValueError('directory and username/organization are required options')
 
-        print 'Storing backup for', organization, 'to', dir
+        print 'Storing backup for', (organization or username), 'to', dir
         if not os.path.exists(dir):
             print 'Directory', dir, 'does not exists, creating it now'
             os.makedirs(dir)

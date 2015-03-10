@@ -1,6 +1,6 @@
 # backup-github
 
-Script for backing up an organization's GitHub repositories.
+Script for backing up a GitHub account's repositories.
 
 ### Dependencies
 * Python 2.7+
@@ -13,14 +13,14 @@ You can install Pexpect using pip
 
 ### Usage
 ```
-usage: backup.py [--help] [--config CONFIG] [--dir DIR]
-                 [--organization ORGANIZATION] [--username USERNAME]
-                 [--password PASSWORD]
+usage: backup-github.py [--help] [--config CONFIG] [--dir DIR]
+                        [--organization ORGANIZATION] [--username USERNAME]
+                        [--password PASSWORD]
 
 Backup a GitHub account
 
 optional arguments:
-  --help, -h            show this help message and exit
+  --help, -h            Show this help message and exit
 
 File-based configuration:
   --config CONFIG, -c CONFIG
@@ -31,7 +31,8 @@ Command line configuration:
   --organization ORGANIZATION, -o ORGANIZATION
                         GitHub organization for which to make a backup
   --username USERNAME, -u USERNAME
-                        GitHub username
+                        GitHub username. If no organization is provided, this
+                        account will be backed up.
   --password PASSWORD, -p PASSWORD
                         GitHub password
 ```
