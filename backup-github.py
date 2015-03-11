@@ -42,7 +42,7 @@ class GitHubBackup(object):
 
     GITHUB_API_ORG_REPOS = "https://api.github.com/orgs/{organization}/repos"
     GITHUB_API_USR_REPOS = "https://api.github.com/users/{user}/repos"
-    GITHUB_API_COMMITS = "https://api.github.com/repos/{organization_or_user}/{repo_name}/commits"
+    GITHUB_API_COMMITS = "https://api.github.com/repos/{owner}/{repo}/commits"
     GIT_CMD_CLONE = "git clone --quiet --mirror {url} {output_dir}"
     PRUNE_TIME = 7 * 24 * 3600 # Remove after 7 days
 
@@ -74,7 +74,7 @@ class GitHubBackup(object):
         return response_dict
 
     def list_commits(self, repo_name):
-        request_url = GitHubBackup.GITHUB_API_COMMITS.format(organization_or_user=self.account, repo_name=repo_name)
+        request_url = GitHubBackup.GITHUB_API_COMMITS.format(owner=self.account, repo=repo_name)
         return self._api_request(request_url)
 
     def list_repos(self):
@@ -190,7 +190,7 @@ def main(argv):
 
         def progress_cb(name, state):
             if state == 0:
-                print 'Backuping up', name + '..',
+                print 'Backing up', name + '..',
             elif state == 1:
                 print 'OK'
             elif state == -2:
