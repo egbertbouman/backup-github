@@ -43,18 +43,26 @@ class GitHubBackup(object):
     GITHUB_API_ORG_REPOS = "https://api.github.com/orgs/{organization}/repos"
     GITHUB_API_USR_REPOS = "https://api.github.com/users/{user}/repos"
     GITHUB_API_COMMITS = "https://api.github.com/repos/{owner}/{repo}/commits"
-    GIT_CMD_CLONE = "git clone --quiet --mirror {url} {output_dir}"
+    GITHUB_API_BRANCHES = "https://api.github.com/repos/{owner}/{repo}/branches"
+
+    GIT_CMD_CLONE = "git clone --quiet --mirror {url} {dir}"
+
     PRUNE_TIME = 7 * 24 * 3600 # Remove after 7 days
 
-    def __init__(self, organization=None, username=None, password=None):
+    def __init__(self, dir, organization=None, username=None, password=None, config=None):
         if not username and not organization:
             raise ValueError('Missing username/organization')
         if organization and username and not password:
             raise ValueError('Missing password')
+
+        self.base_dir = dir
+        self.account = organization or username
         self.username = username
         self.password = password
-        self.account = organization or username
+        self.config = config
+
         self.is_organization = bool(organization)
+        self.repos = {d['name']:d for d in self.list_repos()}
 
     def _api_request(self, url):
         request = urllib2.Request(url)
@@ -73,9 +81,13 @@ class GitHubBackup(object):
 
         return response_dict
 
-    def list_commits(self, repo_name):
-        request_url = GitHubBackup.GITHUB_API_COMMITS.format(owner=self.account, repo=repo_name)
+    def list_commits(self, name):
+        request_url = GitHubBackup.GITHUB_API_COMMITS.format(owner=self.account, repo=name)
         return self._api_request(request_url)
+
+    def list_branches(self, name):
+        request_url = GitHubBackup.GITHUB_API_BRANCHES.format(owner=self.account, repo=name)
+        return {b['name']: b['commit']['sha'] for b in self._api_request(request_url)}
 
     def list_repos(self):
         if self.is_organization:
@@ -84,32 +96,32 @@ class GitHubBackup(object):
             request_url = GitHubBackup.GITHUB_API_USR_REPOS.format(user=self.account)
         return self._api_request(request_url)
 
-    def backup_repos(self, output_dir, progress_cb=None):
-        ts = str(int(time()))
-
-        for repo in self.list_repos():
-            name = repo['name']
-
+    def backup_repos(self, progress_cb=None):
+        for name, repo in self.repos.iteritems():
             if progress_cb:
                 progress_cb(name, 0)
 
-            skip = False
-            commits = self.list_commits(name)
-            short_sha1 = commits[0]['sha'][:7] if commits else None
-            for filename in glob.glob(os.path.join(output_dir, '*.git.zip')):
-                if short_sha1 == filename.split('-')[-2]:
-                    skip = True
-                    break
+            # Get the current HEADs of all branches and compare to the backup
+            cur_state = prv_state = None
+            if self.config:
+                try:
+                    cur_state = self.list_branches(name)
+                    prv_state = json.loads(self.config.get('repository-states', self.account + '/' + name))
+                except:
+                    pass
+            skip = cur_state and cur_state == prv_state
 
             if not skip:
-                repo_output_dir = '%s/%s-%s-%s-%s.git' % (output_dir, self.account, name, short_sha1, ts)
-                ret_code = self.backup_repo(repo['clone_url'], repo_output_dir)
+                ret_code = self.backup_repo(name)
+                if self.config and ret_code == 0:
+                    self.config.set('repository-states', self.account + '/' + name, json.dumps(cur_state))
 
             if progress_cb:
-                progress_cb(repo['name'], (1 if ret_code == 0 else -1) if not skip else -2)
+                progress_cb(name, (1 if ret_code == 0 else -1) if not skip else -2)
 
-    def backup_repo(self, url, output_dir):
-        cmd = GitHubBackup.GIT_CMD_CLONE.format(url=url, output_dir=output_dir)
+    def backup_repo(self, name):
+        output_dir = '%s/%s-%s-%s.git' % (self.base_dir, self.account, name, str(int(time())))
+        cmd = GitHubBackup.GIT_CMD_CLONE.format(url=self.repos[name]['clone_url'], dir=output_dir)
         child = pexpect.spawn(cmd)
         i = child.expect([pexpect.TIMEOUT, 'Username for', pexpect.EOF], timeout=300)
 
@@ -128,9 +140,9 @@ class GitHubBackup(object):
             zip_dir(output_dir, output_dir + '.zip', remove=True)
         return ret_code
 
-    def prune_backups(self, dir):
+    def prune_backups(self):
         # Get the current backups and sort by timestamp
-        backups = glob.glob(os.path.join(dir, '*.git.zip'))
+        backups = glob.glob(os.path.join(self.base_dir, '*.git.zip'))
         backups = [(int(path.split('-')[-1][:-8]), path) for path in backups]
         backups.sort()
 
@@ -139,7 +151,7 @@ class GitHubBackup(object):
         remove_ts = time() - GitHubBackup.PRUNE_TIME
         for ts, path in backups:
             if ts < remove_ts:
-                pattern = '-'.join(path.split('-')[:-2]) + '-???????-??????????.git.zip'
+                pattern = '-'.join(path.split('-')[:-2]) + '-??????????.git.zip'
                 if len(glob.glob(pattern)) > 1:
                     os.remove(path)
 
@@ -165,6 +177,7 @@ def main(argv):
         organization = args.organization
         username = args.username
         password = args.password
+        config = None
 
         if args.config:
             config = ConfigParser.RawConfigParser()
@@ -177,6 +190,10 @@ def main(argv):
             username = config.get(section, 'username')
             password = config._sections[section].get('password', None)
 
+            section = 'repository-states'
+            if section not in config.sections():
+                config.add_section(section)
+
         if not dir or not (username or organization):
             parser.print_usage()
             raise ValueError('directory and username/organization are required options')
@@ -186,7 +203,7 @@ def main(argv):
             print 'Directory', dir, 'does not exists, creating it now'
             os.makedirs(dir)
 
-        backup = GitHubBackup(organization, username, password)
+        backup = GitHubBackup(dir, organization, username, password, config)
 
         def progress_cb(name, state):
             if state == 0:
@@ -198,8 +215,12 @@ def main(argv):
             else:
                 print 'ERROR'
 
-        backup.backup_repos(dir, progress_cb)
-        backup.prune_backups(dir)
+        backup.backup_repos(progress_cb)
+        backup.prune_backups()
+
+        if args.config:
+            with open(args.config, 'wb') as fp:
+                config.write(fp)
 
     except Exception, e:
         print 'Error:', str(e)
