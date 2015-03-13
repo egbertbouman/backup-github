@@ -46,10 +46,11 @@ class GitHubBackup(object):
     GITHUB_API_BRANCHES = "https://api.github.com/repos/{owner}/{repo}/branches"
 
     GIT_CMD_CLONE = "git clone --quiet --mirror {url} {dir}"
+    GIT_CMD_LSREMOTE = "git ls-remote --exit-code -h {url}"
 
     PRUNE_TIME = 30 * 24 * 3600 # Remove after 30 days
 
-    def __init__(self, dir, organization=None, username=None, password=None, config=None):
+    def __init__(self, dir, organization=None, username=None, password=None, config=None, include_wikis=False):
         if not username and not organization:
             raise ValueError('Missing username/organization')
         if organization and username and not password:
@@ -63,6 +64,31 @@ class GitHubBackup(object):
 
         self.is_organization = bool(organization)
         self.repos = {d['name']:d for d in self.list_repos()}
+
+        if include_wikis:
+            for name, repo in self.repos.items():
+                if repo['has_wiki']:
+                    self.repos[name + '.wiki'] = {'clone_url': repo['clone_url'][:-4] + '.wiki.git'}
+
+    def _run_git(self, cmd):
+        child = pexpect.spawn(cmd)
+        i = child.expect([pexpect.TIMEOUT, 'Username for', pexpect.EOF], timeout=300)
+
+        if i == 0:
+            child.terminate()
+            raise Exception('A timeout occurred while running' + cmd)
+        elif i == 1:
+            child.sendline(self.username)
+            child.expect('Password for')
+            child.sendline(self.password)
+            child.expect(pexpect.EOF, timeout=300)
+            # Remove the remainder of the line that requested the password 
+            output = '\n'.join(child.before.split('\n')[1:])
+        else:
+            output = child.before
+        child.close()
+
+        return child.exitstatus if child.exitstatus is not None else child.signalstatus, output
 
     def _api_request(self, url):
         request = urllib2.Request(url)
@@ -86,8 +112,25 @@ class GitHubBackup(object):
         return self._api_request(request_url)
 
     def list_branches(self, name):
-        request_url = GitHubBackup.GITHUB_API_BRANCHES.format(owner=self.account, repo=name)
-        return {b['name']: b['commit']['sha'] for b in self._api_request(request_url)}
+        # For wiki's use ls-remote, for the other repositories use the GitHub API (since it seems to be faster)
+        if name.endswith('.wiki'):
+            cmd = GitHubBackup.GIT_CMD_LSREMOTE.format(url=self.repos[name]['clone_url'])
+            ret_code, output = self._run_git(cmd)
+
+            if ret_code == 0:
+                result = {}
+                for line in output.split('\n'):
+                    if line:
+                        sha1, branch = line.split()
+                        branch = branch.split('/')[-1]
+                        result[branch] = sha1
+                return result
+        else:
+            try:
+                request_url = GitHubBackup.GITHUB_API_BRANCHES.format(owner=self.account, repo=name)
+                return {b['name']: b['commit']['sha'] for b in self._api_request(request_url)}
+            except:
+                pass
 
     def list_repos(self):
         if self.is_organization:
@@ -97,45 +140,34 @@ class GitHubBackup(object):
         return self._api_request(request_url)
 
     def backup_repos(self, progress_cb=None):
-        for name, repo in self.repos.iteritems():
+        for name, repo in sorted(self.repos.items()):
             if progress_cb:
                 progress_cb(name, 0)
 
             # Get the current HEADs of all branches and compare to the backup
+            error = False
             cur_state = prv_state = None
             if self.config:
-                try:
-                    cur_state = self.list_branches(name)
+                cur_state = self.list_branches(name)
+                if self.config.has_option('repository-states', self.account + '/' + name):
                     prv_state = json.loads(self.config.get('repository-states', self.account + '/' + name))
-                except:
-                    pass
-            skip = cur_state and cur_state == prv_state
+                error = cur_state is None
+            skip = cur_state == prv_state
 
-            if not skip:
+            if not error and not skip:
                 ret_code = self.backup_repo(name)
-                if self.config and cur_state and ret_code == 0:
+                if self.config and ret_code == 0:
                     self.config.set('repository-states', self.account + '/' + name, json.dumps(cur_state))
+                error = ret_code != 0
 
             if progress_cb:
-                progress_cb(name, (1 if ret_code == 0 else -1) if not skip else -2)
+                progress_cb(name, (-2 if skip else 1) if not error else -1)
 
     def backup_repo(self, name):
         output_dir = '%s/%s-%s-%s.git' % (self.base_dir, self.account, name, str(int(time())))
         cmd = GitHubBackup.GIT_CMD_CLONE.format(url=self.repos[name]['clone_url'], dir=output_dir)
-        child = pexpect.spawn(cmd)
-        i = child.expect([pexpect.TIMEOUT, 'Username for', pexpect.EOF], timeout=300)
+        ret_code, _ = self._run_git(cmd)
 
-        if i == 0:
-            child.terminate()
-            raise Exception('A timeout occurred while cloning' + url)
-        elif i == 1:
-            child.sendline(self.username)
-            child.expect('Password for')
-            child.sendline(self.password)
-            child.expect(pexpect.EOF, timeout=300)
-        child.close()
-
-        ret_code = child.exitstatus if child.exitstatus is not None else child.signalstatus
         if ret_code == 0:
             zip_dir(output_dir, output_dir + '.zip', remove=True)
         return ret_code
@@ -203,7 +235,7 @@ def main(argv):
             print 'Directory', dir, 'does not exists, creating it now'
             os.makedirs(dir)
 
-        backup = GitHubBackup(dir, organization, username, password, config)
+        backup = GitHubBackup(dir, organization, username, password, config, include_wikis=True)
 
         def progress_cb(name, state):
             if state == 0:
