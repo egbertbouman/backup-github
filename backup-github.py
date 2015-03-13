@@ -47,7 +47,7 @@ class GitHubBackup(object):
 
     GIT_CMD_CLONE = "git clone --quiet --mirror {url} {dir}"
 
-    PRUNE_TIME = 7 * 24 * 3600 # Remove after 7 days
+    PRUNE_TIME = 30 * 24 * 3600 # Remove after 30 days
 
     def __init__(self, dir, organization=None, username=None, password=None, config=None):
         if not username and not organization:
@@ -113,7 +113,7 @@ class GitHubBackup(object):
 
             if not skip:
                 ret_code = self.backup_repo(name)
-                if self.config and ret_code == 0:
+                if self.config and cur_state and ret_code == 0:
                     self.config.set('repository-states', self.account + '/' + name, json.dumps(cur_state))
 
             if progress_cb:
